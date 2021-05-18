@@ -24,21 +24,37 @@
 package com.artipie.files;
 
 import com.artipie.asto.Content;
+import com.artipie.asto.Key;
+import com.artipie.asto.Storage;
+import com.artipie.asto.blocking.BlockingStorage;
+import com.artipie.asto.cache.FromRemoteCache;
 import com.artipie.asto.ext.PublisherAs;
+import com.artipie.asto.memory.InMemoryStorage;
 import com.artipie.http.Headers;
 import com.artipie.http.Slice;
 import com.artipie.http.async.AsyncResponse;
 import com.artipie.http.client.ClientSlices;
+import com.artipie.http.hm.RsHasBody;
+import com.artipie.http.hm.RsHasHeaders;
+import com.artipie.http.hm.RsHasStatus;
+import com.artipie.http.hm.SliceHasResponse;
 import com.artipie.http.rq.RequestLine;
 import com.artipie.http.rq.RqMethod;
+import com.artipie.http.rs.RsFull;
+import com.artipie.http.rs.RsStatus;
+import com.artipie.http.rs.RsWithStatus;
 import com.artipie.http.rs.StandardRs;
+import com.artipie.http.slice.SliceSimple;
 import java.net.URI;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicReference;
+import org.cactoos.map.MapEntry;
 import org.hamcrest.MatcherAssert;
+import org.hamcrest.Matchers;
 import org.hamcrest.collection.IsEmptyIterable;
 import org.hamcrest.core.IsEqual;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -47,7 +63,18 @@ import org.junit.jupiter.api.Test;
  * @since 0.7
  * @checkstyle ClassDataAbstractionCouplingCheck (500 lines)
  */
+@SuppressWarnings("PMD.AvoidDuplicateLiterals")
 final class FileProxySliceTest {
+
+    /**
+     * Test storage.
+     */
+    private Storage storage;
+
+    @BeforeEach
+    void init() {
+        this.storage = new InMemoryStorage();
+    }
 
     @Test
     void sendEmptyHeadersAndContent() throws Exception {
@@ -85,6 +112,87 @@ final class FileProxySliceTest {
             "Body is empty",
             body.get(),
             new IsEqual<>(new byte[0])
+        );
+    }
+
+    @Test
+    void getsContentFromRemoteAndAdsItToCache() {
+        final byte[] body = "some".getBytes();
+        final String key = "any";
+        MatcherAssert.assertThat(
+            "Should returns body from remote",
+            new FileProxySlice(
+                new SliceSimple(
+                    new RsFull(
+                        RsStatus.OK, new Headers.From("header", "value"), new Content.From(body)
+                    )
+                ),
+                new FromRemoteCache(this.storage)
+            ),
+            new SliceHasResponse(
+                Matchers.allOf(
+                    new RsHasBody(body),
+                    new RsHasHeaders(
+                        new MapEntry<>("header", "value"),
+                        new MapEntry<>("Content-Length", "4"),
+                        new MapEntry<>("Content-Length", "4")
+                    )
+                ),
+                new RequestLine(RqMethod.GET, String.format("/%s", key))
+            )
+        );
+        MatcherAssert.assertThat(
+            "Does not store data in cache",
+            new BlockingStorage(this.storage).value(new Key.From(key)),
+            new IsEqual<>(body)
+        );
+    }
+
+    @Test
+    void getsFromCacheOnError() {
+        final byte[] body = "abc123".getBytes();
+        final String key = "any";
+        this.storage.save(new Key.From(key), new Content.From(body)).join();
+        MatcherAssert.assertThat(
+            "Does not return body from cache",
+            new FileProxySlice(
+                new SliceSimple(new RsWithStatus(RsStatus.INTERNAL_ERROR)),
+                new FromRemoteCache(this.storage)
+            ),
+            new SliceHasResponse(
+                Matchers.allOf(
+                    new RsHasStatus(RsStatus.OK), new RsHasBody(body),
+                    new RsHasHeaders(
+                        new MapEntry<>("Content-Length", String.valueOf(body.length))
+                    )
+                ),
+                new RequestLine(RqMethod.GET, String.format("/%s", key))
+            )
+        );
+        MatcherAssert.assertThat(
+            "Data should stays intact in cache",
+            new BlockingStorage(this.storage).value(new Key.From(key)),
+            new IsEqual<>(body)
+        );
+    }
+
+    @Test
+    void returnsNotFoundWhenRemoteReturnedBadRequest() {
+        MatcherAssert.assertThat(
+            "Incorrect status, 404 is expected",
+            new FileProxySlice(
+                new SliceSimple(new RsWithStatus(RsStatus.BAD_REQUEST)),
+                new FromRemoteCache(this.storage)
+            ),
+            new SliceHasResponse(
+                new RsHasStatus(RsStatus.NOT_FOUND),
+                new RequestLine(RqMethod.GET, "/any")
+            )
+        );
+        MatcherAssert.assertThat(
+            "Cache storage is not empty",
+            this.storage.list(Key.ROOT).join().isEmpty(),
+            new IsEqual<>(true)
         );
     }
 
