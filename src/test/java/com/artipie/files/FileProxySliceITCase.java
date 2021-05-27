@@ -23,10 +23,12 @@
  */
 package com.artipie.files;
 
+import com.artipie.asto.Content;
 import com.artipie.asto.Key;
 import com.artipie.asto.Storage;
 import com.artipie.asto.blocking.BlockingStorage;
 import com.artipie.asto.memory.InMemoryStorage;
+import com.artipie.http.client.auth.Authenticator;
 import com.artipie.http.client.jetty.JettyClientSlices;
 import com.artipie.http.hm.RsHasBody;
 import com.artipie.http.hm.SliceHasResponse;
@@ -34,9 +36,11 @@ import com.artipie.http.rq.RequestLine;
 import com.artipie.http.rq.RqMethod;
 import com.artipie.vertx.VertxSliceServer;
 import io.vertx.reactivex.core.Vertx;
+import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
 import org.apache.http.client.utils.URIBuilder;
 import org.hamcrest.MatcherAssert;
+import org.hamcrest.core.IsEqual;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -46,6 +50,7 @@ import org.junit.jupiter.api.Test;
  * @since 0.5
  * @checkstyle ClassDataAbstractionCouplingCheck (500 lines)
  */
+@SuppressWarnings("PMD.AvoidDuplicateLiterals")
 final class FileProxySliceITCase {
 
     /**
@@ -111,6 +116,59 @@ final class FileProxySliceITCase {
             new SliceHasResponse(
                 new RsHasBody(data.getBytes(StandardCharsets.UTF_8)),
                 new RequestLine(RqMethod.GET, "/bar")
+            )
+        );
+    }
+
+    @Test
+    void savesDataInCache() throws URISyntaxException {
+        final byte[] data = "xyz098".getBytes(StandardCharsets.UTF_8);
+        new BlockingStorage(this.storage).save(new Key.From("foo/any"), data);
+        final Storage cache = new InMemoryStorage();
+        MatcherAssert.assertThat(
+            "Does not return content from proxy",
+            new FileProxySlice(
+                this.clients,
+                new URIBuilder().setScheme("http")
+                    .setHost(FileProxySliceITCase.HOST)
+                    .setPort(this.port)
+                    .setPath("/foo")
+                    .build(),
+                Authenticator.ANONYMOUS,
+                cache
+            ),
+            new SliceHasResponse(
+                new RsHasBody(data),
+                new RequestLine(RqMethod.GET, "/any")
+            )
+        );
+        MatcherAssert.assertThat(
+            "Does not cache data",
+            new BlockingStorage(cache).value(new Key.From("any")),
+            new IsEqual<>(data)
+        );
+    }
+
+    @Test
+    void getsFromCacheIfInRemoteNotFound() throws URISyntaxException {
+        final Storage cache = new InMemoryStorage();
+        final byte[] data = "abc123".getBytes(StandardCharsets.UTF_8);
+        final String key = "abc";
+        cache.save(new Key.From(key), new Content.From(data)).join();
+        MatcherAssert.assertThat(
+            new FileProxySlice(
+                this.clients,
+                new URIBuilder().setScheme("http")
+                    .setHost(FileProxySliceITCase.HOST)
+                    .setPort(this.port)
+                    .setPath("/foo")
+                    .build(),
+                Authenticator.ANONYMOUS,
+                cache
+            ),
+            new SliceHasResponse(
+                new RsHasBody(data),
+                new RequestLine(RqMethod.GET, String.format("/%s", key))
             )
         );
     }
